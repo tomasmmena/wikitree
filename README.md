@@ -8,3 +8,4 @@ Este proyecto es desarrollado para la entrega final de la cátedra de Text Minin
 * Bárbara Méndez
 * Ligia Silombria
 * Luciano Oberti
+* Pablo Rodríguez
