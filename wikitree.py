@@ -7,7 +7,7 @@ import spacy
 nlp = spacy.load('en_core_web_sm')
 
 import wikipedia
-from wikipedia.exceptions import DisambiguationError
+from wikipedia.exceptions import DisambiguationError, PageError
 from tabulate import tabulate
 
 parser = argparse.ArgumentParser()
@@ -33,7 +33,7 @@ class TreeNode(object):
         self.name = None
         self.neighbours = []  # type: list[TreeNode]
 
-    def fetch(self, depth: int = 2):
+    def fetch(self, depth: int = 2, width: int = 2):
         """
         Retrive information for this node in the tree from Wikipedia. Determine candidates for adjacent 
         nodes and fetch for those as well with depth-1.
@@ -44,6 +44,7 @@ class TreeNode(object):
         try:
             self.page = wikipedia.page(self.query)
         except DisambiguationError as err:
+            print(f'Disambiguating to {err.args[1][0]}')
             self.page = wikipedia.page(err.args[1][0])
         self.name = self.page.title
         
@@ -56,9 +57,20 @@ class TreeNode(object):
                 entity_counts[(e.text, e.label_)] = entity_counts.get((e.text, e.label_), 0) + 1
 
             # Select entities
-            # TODO: select entities
-            # selected_entities = []  # type: list[str]
-            selected_entities = [k[0] for k, v in sorted(entity_counts.items(), key=lambda _: _[1], reverse=True)][:2]
+            labels = ('PERSON', )
+            candidate_entities = [k[0] for k, v in sorted(entity_counts.items(), key=lambda _: _[1]) if k[1] in labels]
+            selected_entities = []
+            while candidate_entities and len(selected_entities) < width:
+                candidate = candidate_entities.pop()
+                try:
+                    page = wikipedia.page(candidate)
+                except DisambiguationError as err:
+                    page = wikipedia.page(err.args[1][0])
+                except PageError:
+                    continue
+                print(f'{candidate} -> {page.title}')
+                if page.title != self.page.title:
+                    selected_entities.append(candidate)
 
             # Get selected entitites
             for query in selected_entities:
