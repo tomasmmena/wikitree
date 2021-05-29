@@ -3,6 +3,8 @@ Main module for the wikitree application.
 """
 
 import argparse
+import re
+from numpy import tile
 import spacy
 nlp = spacy.load('en_core_web_lg')
 
@@ -14,6 +16,8 @@ from tabulate import tabulate
 parser = argparse.ArgumentParser()
 parser.add_argument('query', type=str, metavar='Q',
                     help='Query to retrieve as root from Wikipedia.')
+# parser.add_argument('--session', '-s', type=str,
+#                     help='Name of the session.')
 parser.add_argument('--depth', '-d', type=int, default=2,
                     help='Max tree depth.')
 parser.add_argument('--width', '-w', type=int, default=2,
@@ -21,7 +25,7 @@ parser.add_argument('--width', '-w', type=int, default=2,
 parser.add_argument('--single-page', action='store_true',
                     help='Provide metrics for a single page rather than building a whole tree.')
 
-ALLOWED_LABELS = ('PERSON', )
+ALLOWED_LABELS = ('PERSON', 'ORG')
 
 
 class RelationshipGraph(object):
@@ -58,8 +62,16 @@ class RelationshipGraph(object):
         :param show: If set to True the pyvis network will be exported to an HTML document and openned in 
             the browser.
         """
-        network = Network()
-        network.add_nodes(list(self.nodes.keys()))
+        network = Network(
+            height='100%',
+            width='100%'
+        )
+        for k, v in self.nodes.items():
+            network.add_node(
+                k,
+                label=k,
+                title=v.label()
+            )
         network.add_edges([t[:2] for t in self.edges])
 
         if show:
@@ -138,7 +150,6 @@ class GraphNode(object):
                         continue
                 if len(candidate.split(' ')) == 1:
                     for other_candidate in reversed(candidate_entities):
-                        # print(candidate, other_candidate)
                         if candidate.lower() in other_candidate.lower() and len(other_candidate.split(' ')) > 1:
                             print(f'Promoting {other_candidate} in place of {candidate}.')
                             candidate = other_candidate
@@ -166,6 +177,24 @@ class GraphNode(object):
                     node.fetch(graph, depth=depth - 1, width=width)
                 
                 graph.edges.add((*sorted([self.name, node.name]), 'UNK'))
+
+    def label(self, max_lenght: int = 100) -> str:
+        """
+        Get a set of labels for the entity represented with this node.
+
+        :param max_lenght: Max lenght for the label.
+        :return: A list of text labels.
+        """
+        first_sentence = next(nlp(self.page.summary).sents).text
+        regex = re.compile('^.*(is a |is an|was a |was an |was the |is the )(?P<summary>.*).$')
+        if match := regex.match(first_sentence):
+            label = match.groupdict()['summary']
+            if len(label) > max_lenght:
+                label = label[:max_lenght] + '...'
+            return label
+
+        return ''
+
 
     def summary(self):
         print('\nEntities:\n')
