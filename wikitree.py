@@ -6,21 +6,23 @@ import argparse
 import re
 from numpy.lib.function_base import copy
 
-from nltk.tokenize import sent_tokenize
+from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.corpus import stopwords
 from transformers import pipeline
-ner = pipeline('ner', grouped_entities=True)
 
+import pickle
 import wikipedia
 from copy import copy
+from pathlib import Path
 from pyvis.network import Network
 from wikipedia.exceptions import DisambiguationError, PageError
 from tabulate import tabulate
 
 parser = argparse.ArgumentParser()
-parser.add_argument('query', type=str, metavar='Q',
+parser.add_argument('--query', '-q', type=str,
                     help='Query to retrieve as root from Wikipedia.')
-# parser.add_argument('--session', '-s', type=str,
-#                     help='Name of the session.')
+parser.add_argument('--session', '-s', type=str,
+                    help='Name of the session.')
 parser.add_argument('--depth', '-d', type=int, default=2,
                     help='Max tree depth.')
 parser.add_argument('--width', '-w', type=int, default=2,
@@ -112,6 +114,7 @@ class GraphNode(object):
             self.page = wikipedia.page(self.query, auto_suggest=False)
         except DisambiguationError as err:
             regex = re.compile('^.* \((?P<hint>.+)\)$')
+            sw = set(stopwords.words('english')) | {'born'}  # stopwords
             candidate = None
             max_count = 0
             if hint_text is not None:
@@ -120,7 +123,7 @@ class GraphNode(object):
                         continue
                     if match := regex.match(alternative):
                         hint = match.groupdict()['hint']
-                        occurrence_count = hint_text.count(hint)
+                        occurrence_count = sum([hint_text.count(token) for token in word_tokenize(hint) if token not in sw])
                         if occurrence_count > max_count:
                             max_count = occurrence_count
                             candidate = alternative
@@ -148,6 +151,11 @@ class GraphNode(object):
             # Extract entities
             entities = []
             content = copy(self.page.content)
+
+            # Cut off references, external links and see also sections
+            for section in ('== References ==', '== See also ==', '== External links =='):
+                content = content.split(section)[0]
+
             while content:
                 chunk, content = content[:2000], content[2000:]
                 entities.extend(ner(chunk))  # Entities extracted from the text
@@ -159,10 +167,13 @@ class GraphNode(object):
             self.entities = entity_counts
 
             # Select entities
-            candidate_entities = [k[0] for k, v in sorted(entity_counts.items(), key=lambda _: _[1]) if k[1] in ALLOWED_LABELS]
+            candidate_entities = [k for k, v in sorted(entity_counts.items(), key=lambda _: _[1]) if k[1] in ALLOWED_LABELS]
             selected_entities = []
-            while candidate_entities and len(selected_entities) < width:
-                candidate = candidate_entities.pop()
+            linked_entities = []
+            while candidate_entities and len(selected_entities) + len(linked_entities) < width:
+                candidate, label = candidate_entities.pop()
+                if '##' in candidate:
+                    continue
 
                 # Promotion logic: if there is a bigram, trigram or ngram further down the list that contains the value, we promote it
                 # to be processed in place of the current candidate. We add it to a set of already processed candidates so as not to process it again.
@@ -172,7 +183,7 @@ class GraphNode(object):
                     if candidate.lower() in processed_candidate.lower():
                         continue
                 if len(candidate.split(' ')) == 1:
-                    for other_candidate in reversed(candidate_entities):
+                    for other_candidate, label in reversed(candidate_entities):
                         if candidate.lower() in other_candidate.lower() and len(other_candidate.split(' ')) > 1:
                             print(f'Promoting {other_candidate} in place of {candidate}.')
                             candidate = other_candidate
@@ -184,8 +195,14 @@ class GraphNode(object):
                 except (PageError, KeyError):  # KeyError controls for an internal error in the wikipedia client.
                     continue
                 print(f'{candidate} -> {page.title}')
+                if '(name)' in page.title or '(surname)' in page.title or '(given name)' in page.title or '(disambiguation)' in page.title:
+                    continue
+
                 if page.title != self.page.title and page.title not in graph.nodes:
                     selected_entities.append(candidate)
+                elif page.title != self.page.title:
+                    linked_entities.append(candidate)
+                    graph.edges.add((*sorted([self.name, page.title]), 'UNK'))
 
             self.selected_entities = selected_entities
 
@@ -225,13 +242,51 @@ class GraphNode(object):
 if __name__ == '__main__':
     print('Welcome to Wikitree!')
     args = parser.parse_args()
+    Path('sessions').mkdir(exist_ok=True)
 
-    if not args.single_page:
-        graph = RelationshipGraph(args.query, depth=args.depth, width=args.width)
-        graph.fetch()
+    if args.query is None and args.session is None:
+        raise argparse.ArgumentError(None, 'A query or a session should be provided.')
 
-        graph.display(show=True)
+    if args.query is not None:
+        ner = pipeline('ner', grouped_entities=True)
+        if args.single_page:
+            # Just load a single node graph and show debugging information.
+            graph = RelationshipGraph(args.query, depth=1)
+            graph.fetch()
+            list(graph.nodes.values())[0].summary()
+        elif args.session is not None:
+            session_path = Path(f'sessions/{args.session}.session')
+            if session_path.is_file():
+                with open(session_path.as_posix(), 'rb') as f:
+                    graph = pickle.load(f)
+                new_node = graph.nodes.get(args.query, None) or GraphNode(args.query)
+                new_node.fetch(graph, args.depth, args.width)
+            else:
+                graph = RelationshipGraph(args.query, depth=args.depth, width=args.width)
+                graph.fetch()
+
+            graph.display(show=True)
+
+            user_command = ''
+            while user_command.lower() not in ('y', 'n'):
+                user_command = input('Save (y/n):')
+            if user_command.lower() == 'y':
+                with open(session_path.as_posix(), 'wb') as f:
+                    pickle.dump(graph, f)
+            
+        else:
+            graph = RelationshipGraph(args.query, depth=args.depth, width=args.width)
+            graph.fetch()
+
+            graph.display(show=True)
+
     else:
-        graph = RelationshipGraph(args.query, depth=1)
-        graph.fetch()
-        list(graph.nodes.values())[0].summary()
+        # simply render the session
+        session_path = Path(f'sessions/{args.session}.session')
+        if session_path.is_file():
+            with open(session_path.as_posix(), 'rb') as f:
+                graph = pickle.load(f)
+            graph.display(show=True)
+        else:
+            raise argparse.ArgumentError(None, f'Could not find session <{args.session}>!')
+
