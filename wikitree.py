@@ -4,11 +4,14 @@ Main module for the wikitree application.
 
 import argparse
 import re
-from numpy import tile
-import spacy
-nlp = spacy.load('en_core_web_lg')
+from numpy.lib.function_base import copy
+
+from nltk.tokenize import sent_tokenize
+from transformers import pipeline
+ner = pipeline('ner', grouped_entities=True)
 
 import wikipedia
+from copy import copy
 from pyvis.network import Network
 from wikipedia.exceptions import DisambiguationError, PageError
 from tabulate import tabulate
@@ -25,7 +28,7 @@ parser.add_argument('--width', '-w', type=int, default=2,
 parser.add_argument('--single-page', action='store_true',
                     help='Provide metrics for a single page rather than building a whole tree.')
 
-ALLOWED_LABELS = ('PERSON', 'ORG')
+ALLOWED_LABELS = ('PER', )
 
 
 class RelationshipGraph(object):
@@ -42,7 +45,7 @@ class RelationshipGraph(object):
             the page is different.
         """
         self.initial_query = query
-        self.nodes = {}  # nodes indexed by key/name
+        self.nodes = {}     # nodes indexed by key/name
         self.edges = set()  # set of tuples of three elements, the keys for the nodes at either end of the 
                             # edge and the label for the relationship
         self.depth = depth
@@ -99,39 +102,59 @@ class GraphNode(object):
         self.all_entities = None
         self.selected_entities = None
 
-    def fetch(self, graph: RelationshipGraph, depth: int = 2, width: int = 2):
+    def get_page(self, hint_text=None) -> wikipedia.WikipediaPage:
         """
-        Retrive information for this node in the graph from Wikipedia. Determine candidates for adjacent 
-        nodes and fetch for those as well with depth-1.
-
-        :param depth: Depth of search.
+        Returns the wikipedia page for a query. Optionally, it can take a hint text for disambiguation, 
+        typically this would be the text content for the source node.
         """
         print(f'Fetching: {self.query}')
         try:
             self.page = wikipedia.page(self.query, auto_suggest=False)
         except DisambiguationError as err:
-            for alternative in err.args[1]:
-                if '(name)' in alternative or '(surname)' in alternative or '(given name)' in alternative or '(disambiguation)' in alternative:
-                    continue
-                print(f'Disambiguating to {alternative}')
-                self.page = wikipedia.page(alternative, auto_suggest=False)
-                break
-            else:
-                print(f'Disambiguating to {err.args[1][0]}')
-                self.page = wikipedia.page(err.args[1][0], auto_suggest=False)
-            
+            regex = re.compile('^.* \((?P<hint>.+)\)$')
+            candidate = None
+            max_count = 0
+            if hint_text is not None:
+                for alternative in err.args[1]:
+                    if '(name)' in alternative or '(surname)' in alternative or '(given name)' in alternative or '(disambiguation)' in alternative:
+                        continue
+                    if match := regex.match(alternative):
+                        hint = match.groupdict()['hint']
+                        occurrence_count = hint_text.count(hint)
+                        if occurrence_count > max_count:
+                            max_count = occurrence_count
+                            candidate = alternative
+
+            print(f'Disambiguating to {candidate or err.args[1][0]}')
+            self.page = wikipedia.page(candidate or err.args[1][0], auto_suggest=False)
+        
         self.name = self.page.title
+        return self.page
+
+    def fetch(self, graph: RelationshipGraph, depth: int = 2, width: int = 2, hint_text=None):
+        """
+        Retrive information for this node in the graph from Wikipedia. Determine candidates for adjacent 
+        nodes and fetch for those as well with depth-1.
+
+        :param depth: Depth of search.
+        :param hint_text: Content text from the source node for assisting with disambiguation.
+        """
+        self.get_page(hint_text=hint_text)
 
         graph.nodes[self.name] = self
         
         processed = set()
         if depth > 0:
             # Extract entities
-            entities = nlp(self.page.content).ents  # Entities extracted from the text
+            entities = []
+            content = copy(self.page.content)
+            while content:
+                chunk, content = content[:2000], content[2000:]
+                entities.extend(ner(chunk))  # Entities extracted from the text
             entity_counts = {}
 
             for e in entities:
-                entity_counts[(e.text, e.label_)] = entity_counts.get((e.text, e.label_), 0) + 1
+                entity_counts[(e['word'], e['entity_group'])] = entity_counts.get((e['word'], e['entity_group']), 0) + 1
 
             self.entities = entity_counts
 
@@ -157,9 +180,7 @@ class GraphNode(object):
                 processed.add(candidate)
                 
                 try:
-                    page = wikipedia.page(candidate, auto_suggest=False)
-                except DisambiguationError as err:
-                    page = wikipedia.page(err.args[1][0], auto_suggest=False)
+                    page = GraphNode(candidate).get_page(hint_text=self.page.content)
                 except (PageError, KeyError):  # KeyError controls for an internal error in the wikipedia client.
                     continue
                 print(f'{candidate} -> {page.title}')
@@ -174,7 +195,7 @@ class GraphNode(object):
                     node = graph.nodes.get(query)
                 else:
                     node = GraphNode(query)
-                    node.fetch(graph, depth=depth - 1, width=width)
+                    node.fetch(graph, depth=depth - 1, width=width, hint_text=self.page.content)
                 
                 graph.edges.add((*sorted([self.name, node.name]), 'UNK'))
 
@@ -185,7 +206,7 @@ class GraphNode(object):
         :param max_lenght: Max lenght for the label.
         :return: A list of text labels.
         """
-        first_sentence = next(nlp(self.page.summary).sents).text
+        first_sentence = sent_tokenize(self.page.summary)[0]
         regex = re.compile('^.*(is a |is an|was a |was an |was the |is the )(?P<summary>.*).$')
         if match := regex.match(first_sentence):
             label = match.groupdict()['summary']
