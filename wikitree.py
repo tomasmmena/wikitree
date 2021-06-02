@@ -107,6 +107,8 @@ class GraphNode(object):
         Initialize graph node.
 
         :param query: Query for this node.
+        :param node_type: String identifier for the type of node. This admits entity types supported by the 
+            base NER implementation on BERT. Accepted values are PER, ORG and LOC.
         """
         self.query = query
         self.page = None
@@ -116,42 +118,46 @@ class GraphNode(object):
         self.all_entities = None
         self.selected_entities = None
 
-    def get_page(self, hint_text=None) -> wikipedia.WikipediaPage:
+    def get_page(self, hint_text: str = None) -> wikipedia.WikipediaPage:
         """
         Returns the wikipedia page for a query. Optionally, it can take a hint text for disambiguation, 
         typically this would be the text content for the source node.
+
+        :param hint_text: Optional text to be used as an aid for disambiguation.
         """
         print(f'Fetching: {self.query}')
-        try:
-            self.page = wikipedia.page(self.query, auto_suggest=False)
-        except DisambiguationError as err:
-            regex = re.compile('^.* \((?P<hint>.+)\)$')
-            sw = set(stopwords.words('english')) | {'born'}  # stopwords
-            candidate = None
-            max_count = 0
-            if hint_text is not None and self.node_type == 'PER':
-                for alternative in err.args[1]:
-                    if '(name)' in alternative or '(surname)' in alternative or '(given name)' in alternative or '(disambiguation)' in alternative:
-                        continue
-                    if match := regex.match(alternative):
-                        hint = match.groupdict()['hint']
-                        occurrence_count = sum([hint_text.count(token) for token in word_tokenize(hint) if token not in sw])
-                        if occurrence_count > max_count:
-                            max_count = occurrence_count
-                            candidate = alternative
+        if self.page is None:
+            try:
+                self.page = wikipedia.page(self.query, auto_suggest=False)
+            except DisambiguationError as err:
+                regex = re.compile('^.* \((?P<hint>.+)\)$')
+                sw = set(stopwords.words('english')) | {'born'}  # stopwords
+                candidate = None
+                max_count = 0
+                if hint_text is not None and self.node_type == 'PER':
+                    for alternative in err.args[1]:
+                        if '(name)' in alternative or '(surname)' in alternative or '(given name)' in alternative or '(disambiguation)' in alternative:
+                            continue
+                        if match := regex.match(alternative):
+                            hint = match.groupdict()['hint']
+                            occurrence_count = sum([hint_text.count(token) for token in word_tokenize(hint) if token not in sw])
+                            if occurrence_count > max_count:
+                                max_count = occurrence_count
+                                candidate = alternative
 
-            print(f'Disambiguating to {candidate or err.args[1][0]}')
-            self.page = wikipedia.page(candidate or err.args[1][0], auto_suggest=False)
-        
-        self.name = self.page.title
+                print(f'Disambiguating to {candidate or err.args[1][0]}')
+                self.page = wikipedia.page(candidate or err.args[1][0], auto_suggest=False)
+            
+            self.name = self.page.title
         return self.page
 
-    def fetch(self, graph: RelationshipGraph, depth: int = 2, width: int = 2, hint_text=None):
+    def fetch(self, graph: RelationshipGraph, depth: int = 2, width: int = 2, hint_text: str = None):
         """
         Retrive information for this node in the graph from Wikipedia. Determine candidates for adjacent 
         nodes and fetch for those as well with depth-1.
 
         :param depth: Depth of search.
+        :param width: Number of nodes to expand from a single node.
         :param hint_text: Content text from the source node for assisting with disambiguation.
         """
         self.get_page(hint_text=hint_text)
@@ -184,7 +190,7 @@ class GraphNode(object):
             linked_entities = []
             while depth > 0 and candidate_entities and (len(selected_entities) + len(linked_entities) < width or len([_ for _ in selected_entities if _[1] == 'PER']) == 0):
                 candidate, label = candidate_entities.pop()
-                if '##' in candidate:
+                if '##' in candidate or len(candidate) < 2:  # Discard ner's partial tokens and single letter tokens
                     continue
 
                 # Promotion logic: if there is a bigram, trigram or ngram further down the list that contains the value, we promote it
@@ -249,6 +255,9 @@ class GraphNode(object):
 
 
     def summary(self):
+        """
+        Print a debug summary for the node.
+        """
         print('\nEntities:\n')
         print(tabulate([(k[0], k[1], v) for k, v in sorted(self.entities.items(), key=lambda _: _[1], reverse=True) if k[1] in ALLOWED_LABELS]))
 
@@ -271,11 +280,13 @@ if __name__ == '__main__':
         elif args.session is not None:
             session_path = Path(f'sessions/{args.session}.session')
             if session_path.is_file():
+                # Load session from file system
                 with open(session_path.as_posix(), 'rb') as f:
                     graph = pickle.load(f)
                 new_node = graph.nodes.get(args.query, None) or GraphNode(args.query, node_type=args.label)
                 new_node.fetch(graph, args.depth, args.width)
             else:
+                # Create new session
                 graph = RelationshipGraph(args.query, depth=args.depth, width=args.width, initial_label=args.label)
                 graph.fetch()
 
@@ -289,7 +300,7 @@ if __name__ == '__main__':
                     pickle.dump(graph, f)
             
         else:
-            graph = RelationshipGraph(args.query, depth=args.depth, width=args.width, label=args.label)
+            graph = RelationshipGraph(args.query, depth=args.depth, width=args.width, initial_label=args.label)
             graph.fetch()
 
             graph.display(show=True)
