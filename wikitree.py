@@ -4,6 +4,7 @@ Main module for the wikitree application.
 
 import argparse
 import re
+import string
 from numpy.lib.function_base import copy
 
 from nltk.tokenize import sent_tokenize, word_tokenize
@@ -92,6 +93,7 @@ class RelationshipGraph(object):
 
         if show:
             network.toggle_physics(True)
+            network.set_edge_smooth('dynamic')
             network.show('output.html')
         
         return network
@@ -131,22 +133,30 @@ class GraphNode(object):
                 self.page = wikipedia.page(self.query, auto_suggest=False)
             except DisambiguationError as err:
                 regex = re.compile('^.* \((?P<hint>.+)\)$')
-                sw = set(stopwords.words('english')) | {'born'}  # stopwords
+                sw = set(stopwords.words('english')) | {'born'} | set(string.punctuation)  # stopwords
                 candidate = None
                 max_count = 0
                 if hint_text is not None and self.node_type == 'PER':
                     for alternative in err.args[1]:
                         if '(name)' in alternative or '(surname)' in alternative or '(given name)' in alternative or '(disambiguation)' in alternative:
+                            print('not proper noun')
                             continue
                         if match := regex.match(alternative):
                             hint = match.groupdict()['hint']
                             occurrence_count = sum([hint_text.count(token) for token in word_tokenize(hint) if token not in sw])
+                            print(f'{alternative} -> {occurrence_count}')
                             if occurrence_count > max_count:
                                 max_count = occurrence_count
                                 candidate = alternative
 
                 print(f'Disambiguating to {candidate or err.args[1][0]}')
-                self.page = wikipedia.page(candidate or err.args[1][0], auto_suggest=False)
+                for page in [candidate] + err.args[1]:
+                    if page is not None:
+                        try:
+                            self.page = wikipedia.page(page, auto_suggest=False)
+                            break
+                        except Exception as err2:
+                            print(f'{err2} fetching {page}.')
             
             self.name = self.page.title
         return self.page
@@ -186,9 +196,11 @@ class GraphNode(object):
 
             # Select entities
             candidate_entities = [k for k, v in sorted(entity_counts.items(), key=lambda _: _[1]) if k[1] in ALLOWED_LABELS]
-            selected_entities = []
+            person_entities = []
+            location_entities = []
+            org_entities = []
             linked_entities = []
-            while depth > 0 and candidate_entities and (len(selected_entities) + len(linked_entities) < width or len([_ for _ in selected_entities if _[1] == 'PER']) == 0):
+            while depth > 0 and candidate_entities and len(person_entities) + len(linked_entities) < width:
                 candidate, label = candidate_entities.pop()
                 if '##' in candidate or len(candidate) < 2:  # Discard ner's partial tokens and single letter tokens
                     continue
@@ -219,11 +231,16 @@ class GraphNode(object):
                     continue
 
                 if page.title != self.page.title and page.title not in graph.nodes:
-                    selected_entities.append((candidate, label))
-                elif page.title != self.page.title:
+                    {
+                        'PER': person_entities,
+                        'ORG': org_entities,
+                        'LOC': location_entities
+                    }.get(label, []).append((candidate, label))
+                elif page.title != self.page.title and label == 'PER':
                     linked_entities.append(candidate)
                     graph.edges.add((*sorted([self.name, page.title]), 'UNK'))
 
+            selected_entities = location_entities[:2] + org_entities[:2] + person_entities
             self.selected_entities = selected_entities
 
             # Get selected entitites
